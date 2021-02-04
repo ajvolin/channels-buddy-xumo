@@ -9,10 +9,10 @@ use ChannelsBuddy\SourceProvider\Models\Guide;
 use ChannelsBuddy\SourceProvider\Models\GuideEntry;
 use ChannelsBuddy\SourceProvider\Contracts\ChannelSource;
 use Carbon\Carbon;
+use Carbon\CarbonInterval;
 use GuzzleHttp\Client;
-use GuzzleHttp\Exception\RequestException;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\LazyCollection;
 use JsonMachine\JsonMachine;
 use JsonMachine\JsonDecoder\ExtJsonDecoder;
@@ -26,9 +26,6 @@ class XumoService implements ChannelSource
     protected $channelListId;
     protected $geoId;
     protected $httpClient;
-    protected $defaultChannelArtUrl =
-        "https://komonews.com/resources/media2/4x3/full/1440/center/100/22bd9810-78d3-43d9-9425-ba4373465f58-full1x1_STIRR.Logo.BlackYellow01.png";
-    private $sortValueNumber = 200;
 
     public function __construct()
     {
@@ -59,7 +56,7 @@ class XumoService implements ChannelSource
 
         $onNowChannels = collect(json_decode($onNowJson)->results)
         ->filter(function($onNowChannel) {
-            return $onNowChannel->contentType != 'COMPOSITE';
+            return $onNowChannel->contentType == 'SIMULCAST';
         })->keyBy('channelId');
 
         $channelStream = $this->httpClient->get(
@@ -90,13 +87,88 @@ class XumoService implements ChannelSource
 
     public function getGuideData(?int $startTimestamp, ?int $duration, ?string $device = null): Guide
     {
-        return new Guide(LazyCollection::make(function(){
-            yield null;
-        }));
+        if (is_null($startTimestamp)) {
+            $startTimestamp = Carbon::now()->timestamp;
+        }
+
+        if (is_null($duration)) {
+            $duration = 86400;
+        }
+
+        $emptyProgramIntervalStartTime =
+            Carbon::createFromTimestamp($startTimestamp);
+
+        $emptyProgramIntervals = CarbonInterval::minutes(60)
+        ->toPeriod(
+                $emptyProgramIntervalStartTime,
+                $emptyProgramIntervalStartTime
+                    ->copy()
+                    ->addSeconds($duration - 1)
+        );
+
+        $guideEntries = LazyCollection::make(function()
+            use ($emptyProgramIntervals) {
+            foreach ($this->getChannels()->channels as $channel) {
+                $guideEntry = new GuideEntry($channel);
+
+                $airings = LazyCollection::make(function()
+                    use ($channel, $emptyProgramIntervals) {
+                        foreach ($emptyProgramIntervals as $date) {
+                            yield $this->generateAiringBlockForChannel(
+                                    $channel,
+                                    $date
+                                );
+                        }
+                    });
+
+                $guideEntry->airings = $airings;
+                yield $guideEntry;
+            }
+        });
+
+        return new Guide($guideEntries);
     }
 
-    private function generateAiring(Channel $channel, stdClass $entry): Airing
+    private function generateAiringBlockForChannel(Channel $channel, Carbon $date): Airing
     {
+        $airingId = md5(
+            $channel->id.$date->copy()->timestamp
+        );
+
+        $title = $channel->title
+            ?? $channel->name
+            ?? "To be announced";
+
+        $subTitle = sprintf("%s hour long block", $title);
+
+        $description = $channel->description
+            ?? "To be announced";
+
+        $seriesId = md5($channel->id);
+        $programId = $seriesId . "." . $date->copy()->timestamp;
+        $seasonNumber = $date->copy()->format("Y");
+        $episodeNumber = $date->copy()->format("mdH");
+        
+        $airing = new Airing([
+            'id'                    => $airingId,
+            'channelId'             => $channel->id,
+            'startTime'             => $date->copy()->startOfHour(),
+            'stopTime'              => $date->copy()->endOfHour(),
+            'length'                => 3600,
+            'title'                 => $title,
+            'subTitle'              => $subTitle,
+            'description'           => $description,
+            'programId'             => $programId,
+            'seriesId'              => $seriesId,
+            'seasonNumber'          => $seasonNumber,
+            'episodeNumber'         => $episodeNumber,
+            'originalReleaseDate'   => $date->copy(),
+            'isMovie'               => false
+        ]);
+
+        $airing->addCategory($channel->getCategory());
+            
+        return $airing;
     }
     
     private function generateChannel(stdClass $channel): Channel
@@ -109,7 +181,7 @@ class XumoService implements ChannelSource
             "number"        => $channel->number,
             "title"         => $channel->title,
             "callSign"      => $channel->callsign,
-            "description"   => $channel->description,
+            "description"   => $this->getCleanDescription($channel->description),
             "logo"          => $this->getLogoUrl($channel->guid->value),
             "channelArt"    => $this->getChannelArtUrl($channel->guid->value),
             "category"      => $channel->genre[0]->value ?? null,
@@ -122,6 +194,13 @@ class XumoService implements ChannelSource
         return sprintf(
             'https://image.xumo.com/v1/channels/channel/%s/1024x768.png?type=channelTile',
             $channelId
+        );
+    }
+
+    private function getCleanDescription(string $description): string
+    {
+        return preg_replace('/("|“|”)/m', '',
+            preg_replace('/(\r\n|\n|\r)/m', ' ', $description)
         );
     }
 
@@ -168,18 +247,21 @@ class XumoService implements ChannelSource
                 preg_match('/"channelListId":"(.*?)",/m', $response, $channelList);
                 preg_match('/"geoId":"(.*?)",/m', $response, $geoId);
 
+                Log::info("Channels Buddy Xumo Source Provider: Channel List ID set to {$channelList[1]}");
+                Log::info("Channels Buddy Xumo Source Provider: geoId set to {$geoId[1]}");
+
                 return [
                     'channelListId' => $channelList[1],
                     'geoId' => $geoId[1]
                 ];
             } catch (Throwable $e) {
-                report("Xumo setup failed.");
+                report("Channels Buddy Xumo Source Provider: Setup failed.");
             }
         });
 
         if (empty($ids)) {
             Cache::forget('channels-buddy-xumo.identifiers');
-            report("Xumo failed to get location identifiers.");
+            report("Channels Buddy Xumo Source Provider: Failed to get location identifiers.");
             abort(500);
         } else {
             $this->channelListId = $ids['channelListId'];

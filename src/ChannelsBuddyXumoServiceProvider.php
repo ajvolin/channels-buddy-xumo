@@ -22,7 +22,9 @@ class ChannelsBuddyXumoServiceProvider extends ServiceProvider
                 XumoService::class,
                 'Xumo',
                 true,
-                false
+                true,
+                1814400,
+                1814400
             )
         );
     }
