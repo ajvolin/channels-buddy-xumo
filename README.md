@@ -1,7 +1,7 @@
-# Channels Buddy Stirr Source Provider
+# Channels Buddy Xumo Source Provider
 
-Adds Stirr as a source in Channels Buddy.
+Adds Xumo as a source in Channels Buddy.
 
 ## Install
 
-    composer require ajvolin/channels-buddy-stirr
+    composer require ajvolin/channels-buddy-xumo
