@@ -19,7 +19,7 @@ use JsonMachine\JsonDecoder\ExtJsonDecoder;
 use stdClass;
 use Throwable;
 
-class StirrService implements ChannelSource
+class XumoService implements ChannelSource
 {
     protected $baseUrl;
     protected $loginUrl;
