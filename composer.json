@@ -1,0 +1,38 @@
+{
+    "name": "ajvolin/channels-buddy-xumo",
+    "description": "Adds Xumo as a source to Channels Buddy",
+    "keywords": [
+        "Channels",
+        "Channels Buddy",
+        "Xumo"
+    ],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Adam Volin",
+            "email": "trome.auay@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^7.4|^8.0",
+        "ajvolin/channels-buddy-source-provider": "^0.1.2",
+        "guzzlehttp/guzzle": "^7.2",
+        "halaxa/json-machine": "^0.5.0",
+        "illuminate/support": "^8.0",
+        "nesbot/carbon": "^2.40.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "ChannelsBuddy\\Xumo\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "ChannelsBuddy\\Xumo\\ChannelsBuddyXumoServiceProvider"
+            ]
+        }
+    },
+    "prefer-stable": true
+}
