@@ -167,7 +167,8 @@ class XumoService implements ChannelSource
         ]);
 
         $airing->addCategory($channel->getCategory());
-            
+        $airing->setImage($channel->getChannelArt());
+
         return $airing;
     }
     
