@@ -11,15 +11,20 @@ use ChannelsBuddy\SourceProvider\Contracts\ChannelSource;
 use Carbon\Carbon;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Collection;
 use Illuminate\Support\LazyCollection;
 use JsonMachine\JsonMachine;
 use JsonMachine\JsonDecoder\ExtJsonDecoder;
 use stdClass;
+use Throwable;
 
 class StirrService implements ChannelSource
 {
     protected $baseUrl;
-    protected $baseStationUrl;
+    protected $loginUrl;
+    protected $channelListId;
+    protected $geoId;
     protected $httpClient;
     protected $defaultChannelArtUrl =
         "https://komonews.com/resources/media2/4x3/full/1440/center/100/22bd9810-78d3-43d9-9425-ba4373465f58-full1x1_STIRR.Logo.BlackYellow01.png";
@@ -27,10 +32,12 @@ class StirrService implements ChannelSource
 
     public function __construct()
     {
+        $this->loginUrl =
+            'http://www.xumo.tv';
         $this->baseUrl =
-            'https://ott-gateway-stirr.sinclairstoryline.com/api/rest/v3/';
-        $this->baseStationUrl =
-            'https://ott-stationselection.sinclairstoryline.com/stationAutoSelection';
+            'https://valencia-app-mds.xumo.com/v2/';
+
+        $this->setChannelListAndGeoId();
 
         $this->httpClient = new Client(['base_uri' => $this->baseUrl]);
     }
@@ -42,236 +49,141 @@ class StirrService implements ChannelSource
 
     public function getChannels(?string $device = null): Channels
     {
-        $channels = LazyCollection::make(function() {
-            $stationLineups = config(
-                    'channels.channelSources.stirr.stationLineups', 
-                    ['national']
-                );
+        $onNowStream = $this->httpClient->get(
+            sprintf(
+                'channels/list/%s.json?geoId=%s',
+                $this->channelListId,
+                $this->geoId
+            )
+        );
+        $onNowJson = $onNowStream->getBody()->getContents();
 
-            $processedChannels = [];
+        $onNowChannels = collect(json_decode($onNowJson)->results)
+        ->filter(function($onNowChannel) {
+            return $onNowChannel->contentType != 'COMPOSITE';
+        })->keyBy('channelId');
 
-            $lineupAutoSelectStream = $this->httpClient->get($this->baseStationUrl);
-            $lineupAutoSelectJson = \GuzzleHttp\Psr7\StreamWrapper::getResource(
-                $lineupAutoSelectStream->getBody()
-            );
-            $lineupAutoSelectList = JsonMachine::fromStream(
-                $lineupAutoSelectJson, '/page', new ExtJsonDecoder
-            );
+        $channelStream = $this->httpClient->get(
+            sprintf(
+                'channels/list/%s.json?geoId=%s',
+                $this->channelListId,
+                $this->geoId
+            )
+        );
+        $channelJson = \GuzzleHttp\Psr7\StreamWrapper::getResource(
+            $channelStream->getBody()
+        );
 
-            foreach ($lineupAutoSelectList as $lineups) {
-                foreach ($lineups
-                    ->button
-                    ->{'media:content'}
-                    ->{'sinclair:action_config'}
-                    ->station as $lineup) {
-                            
-                    if(!in_array($lineup, $stationLineups)) {
-                        array_push($stationLineups, $lineup);
-                    }
-                }
-            }
-
-            foreach ($stationLineups as $lineup) {
-                $lineupChannelsStream = $this->httpClient->get(
-                    sprintf('channels/stirr?station=%s', $lineup)
-                );
-                $lineupChannelsJson = \GuzzleHttp\Psr7\StreamWrapper::getResource(
-                    $lineupChannelsStream->getBody()
-                );
-                $lineupChannels = JsonMachine::fromStream(
-                    $lineupChannelsJson, '/channel', new ExtJsonDecoder
-                );
-
-                foreach ($lineupChannels as $lineupChannel) {
-                    if (!in_array($lineupChannel->id, $processedChannels)) {
-                        try {
-                            $channelsStream = $this->httpClient->get(
-                                sprintf('status/%s', $lineupChannel->id)
-                            );
-                            $channelsJson = \GuzzleHttp\Psr7\StreamWrapper::getResource(
-                                $channelsStream->getBody()
-                            );
-                            $channels = JsonMachine::fromStream(
-                                $channelsJson, '', new ExtJsonDecoder
-                            );
-                            foreach($channels as $channel) {
-                                if (substr($channel->channel->title, 0, 3) != 'zzz') {
-                                    try {
-                                        $channelMediaStream = $this->httpClient->get(
-                                            sprintf('stirr/media/%s', $lineupChannel->id)
-                                        );
-                                        $channelMediaJson = $channelMediaStream->getBody()->getContents();
-                                        $channelMedia = json_decode($channelMediaJson);
-                                    } catch (RequestException $e) {
-                                        $channelMedia = null;
-                                    }
-                                    yield $lineupChannel->id =>
-                                        $this->generateChannel(
-                                            $lineupChannel,
-                                            $channel,
-                                            $channelMedia
-                                        );
-                                }
-                            }
-                        } catch (RequestException $e) {}
-                        array_push($processedChannels, $lineupChannel->id);
-                    }
-                }
-            }
+        $channels = LazyCollection::make(JsonMachine::fromStream(
+            $channelJson, '/channel/item', new ExtJsonDecoder
+        ))
+        ->filter(function($channel) use ($onNowChannels) {
+            return $onNowChannels->has($channel->guid->value);
+        })
+        ->map(function($channel) use ($onNowChannels) {
+            $channel->streamAssetId =
+                $onNowChannels->get($channel->guid->value)->id;
+            return $this->generateChannel($channel);
         })->keyBy('id');
-        
+
         return new Channels($channels);
     }
 
     public function getGuideData(?int $startTimestamp, ?int $duration, ?string $device = null): Guide
     {
-        $guideEntries = LazyCollection::make(function() {
-            $channels = $this->getChannels()->channels;
-            foreach ($channels as $channel) {
-                try {
-                    $stream = $this->httpClient->get(
-                        sprintf('program/stirr/ott/%s', $channel->id)
-                    );
-                    $json = \GuzzleHttp\Psr7\StreamWrapper::getResource(
-                        $stream->getBody()
-                    );
-                    $guideData = JsonMachine::fromStream(
-                        $json, '/programme', new ExtJsonDecoder
-                    );
-    
-                    $guideEntry = new GuideEntry($channel);
-
-                    $airings = LazyCollection::make(function() use ($channel, $guideData) {
-                        foreach ($guideData as $entry) {        
-                            yield $this->generateAiring($channel, $entry);
-                        }
-                    });
-
-                    $guideEntry->airings = $airings;
-                    yield $guideEntry;
-                } catch (RequestException $e) {}
-            }
-        });
-    
-        return new Guide($guideEntries);
+        return new Guide(LazyCollection::make(function(){
+            yield null;
+        }));
     }
 
     private function generateAiring(Channel $channel, stdClass $entry): Airing
     {
-        $startTime = Carbon::parse($entry->start);
-        $stopTime = Carbon::parse($entry->stop);
-        $length = $startTime->copy()->diffInSeconds($stopTime);
-        $airingId = $channel->id . $startTime->copy()->timestamp;
-        $seriesId = md5($entry->title->value);
-        $programId = $seriesId.".".md5($entry->desc->value);
-        $isLive = filter_var($entry->{'sinclair:isLiveProgram'},
-            FILTER_VALIDATE_BOOLEAN
-        );
-
-        $airing = new Airing([
-            'id'                    => $airingId,
-            'channelId'             => $channel->id,
-            'source'                => "stirr",
-            'title'                 => $entry->title->value,
-            'titleLanguage'         => substr($entry->title->lang, 0, 2),
-            'description'           => $entry->desc->value,
-            'descriptionLanguage'   => substr($entry->desc->lang, 0, 2),
-            'startTime'             => $startTime,
-            'stopTime'              => $stopTime,
-            'length'                => $length,
-            'programId'             => $programId,
-            'seriesId'              => $seriesId,
-            'isLive'                => $isLive
-        ]);
-        
-        if (isset($entry->category)) {
-            foreach ($entry->category as $category) {
-                if(substr($category->value, 0, 2) == 'HD') {
-                    $airing->setIsHdtv(true);
-                }
-                if($category->value == 'Live') {
-                    $airing->setIsLive(true);
-                }
-                if($category->value == 'New') {
-                    $airing->setIsNew(true);
-                }
-                if($category->value == 'Stereo') {
-                    $airing->setIsStereo(true);
-                }
-                if($category->value == 'CC') {
-                    $airing->setHasClosedCaptioning(true);
-                }
-            }
-        }
-
-        return $airing;
     }
     
-    private function generateChannel(stdClass $lineupChannel, stdClass $channel, stdClass $channelMedia = null): Channel
+    private function generateChannel(stdClass $channel): Channel
+    {        
+        $streamUrl = $this->getStreamUrl($channel->streamAssetId);
+
+        return new Channel([
+            "id"            => $channel->guid->value,
+            "name"          => $channel->title,
+            "number"        => $channel->number,
+            "title"         => $channel->title,
+            "callSign"      => $channel->callsign,
+            "description"   => $channel->description,
+            "logo"          => $this->getLogoUrl($channel->guid->value),
+            "channelArt"    => $this->getChannelArtUrl($channel->guid->value),
+            "category"      => $channel->genre[0]->value ?? null,
+            "streamUrl"     => $streamUrl
+        ]);
+    }
+
+    private function getChannelArtUrl(string $channelId): string
     {
-        if (isset($lineupChannel->icon->src)) {
-            $logo = str_replace(
-                "180/center/90",
-                "512/center/100",
-                strtok(
-                    $lineupChannel->icon->src, '?'
+        return sprintf(
+            'https://image.xumo.com/v1/channels/channel/%s/1024x768.png?type=channelTile',
+            $channelId
+        );
+    }
+
+    private function getLogoUrl(string $channelId, string $color = 'White'): string
+    {
+        return sprintf(
+            'https://image.xumo.com/v1/channels/channel/%s/1024x768.png?type=color_on%s',
+            $channelId,
+            ucwords(strtolower($color))
+        );
+    }
+
+    private function getStreamUrl(string $streamAssetId): string
+    {
+        try {
+            $assetStream = $this->httpClient->get(
+                sprintf(
+                    'assets/asset/%s.json?f=providers',
+                    $streamAssetId
                 )
             );
-        } else {
-            $logo = null;
-        }
+            $assetJson = $assetStream->getBody()->getContents();
+            $asset = collect(json_decode($assetJson));
 
-        if (!is_null($mediaUrls = $channelMedia
-            ->rss
-            ->channel
-            ->item
-            ->{'media:content'}
-            ->{'media:thumbnail'} ?? null)) {
-            
-            $channelArt = collect($mediaUrls)
-            ->filter(function($mediaUrl){
-                return ($mediaUrl->width == $mediaUrl->height ||
-                    $mediaUrl->width == "1920") &&
-                    strpos($mediaUrl->url, "EPG.png") === false;
-            })
-            ->transform(function($mediaUrl){
-                $mediaUrl->url = str_replace(
-                    "media2/1x1",
-                    "media2/4x3",
-                    str_replace(
-                        "center/90",
-                        "center/100",
-                        strtok($mediaUrl->url, '?')
-                    )
-                );
-                return $mediaUrl;
-            })->sortBy([
-                ["width", "asc"],
-                ["height", "desc"]
-            ])->values()->first()->url ?? null;
+            return $asset
+                ->providers
+                ->first()
+                ->sources
+                ->first()
+                ->uri ?? '';
+        } catch (Throwable $e) {
+            return '';
         }
+    }
 
-        if (trim($lineupChannel->{'display-name'}) == 'dco') {
-            $sortValue = "1_" . $channel->channel->title;
-        } else {
-            $sortValue = $this->sortValueNumber;
-            $this->sortValueNumber++;
-        }
+    private function setChannelListAndGeoId(): void
+    {
+        $ids = Cache::remember('channels-buddy-xumo.ids', 43200, function() {
+                try {
+                    $request = $this->httpClient->get(
+                        $this->loginUrl, [
+                            'headers' => [
+                                'User-Agent' => 'Mozilla/5.0'
+                            ]
+                        ]
+                    );
+                    $response = $request->getBody()->getContents();
 
-        return new Channel(
-            [
-                'id'            => $lineupChannel->id,
-                'name'          => trim($channel->channel->title),
-                'number'        => null,
-                'title'         => trim($channel->channel->title),
-                'callSign'      => trim($lineupChannel->{'display-name'}),
-                'description'   => trim($channel->channel->description),
-                'logo'          => $logo,
-                'channelArt'    => $channelArt ?? $this->defaultChannelArtUrl,
-                'category'      => trim($channel->channel->item->category),
-                'streamUrl'     => $channel->channel->item->link,
-                'sortValue'     => (string) $sortValue
-            ]
-        );
+                    preg_match('/"channelListId":"(.*?)",/m', $response, $channelList);
+                    preg_match('/"geoId":"(.*?)",/m', $response, $geoId);
+
+                    return [
+                        'channelListId' => $channelList[1],
+                        'geoId' => $geoId[1]
+                    ];
+                } catch (Throwable $e) {
+                    report("Xumo setup failed.");
+                    abort(500);
+                }
+            });
+        $this->channelListId = $ids['channelListId'];
+        $this->geoId = $ids['geoId'];
     }
 }
