@@ -37,9 +37,9 @@ class XumoService implements ChannelSource
         $this->baseUrl =
             'https://valencia-app-mds.xumo.com/v2/';
 
-        $this->setChannelListAndGeoId();
-
         $this->httpClient = new Client(['base_uri' => $this->baseUrl]);
+
+        $this->setChannelListAndGeoId();
     }
 
     public function getBaseUrl(): string
@@ -51,9 +51,8 @@ class XumoService implements ChannelSource
     {
         $onNowStream = $this->httpClient->get(
             sprintf(
-                'channels/list/%s.json?geoId=%s',
-                $this->channelListId,
-                $this->geoId
+                'channels/list/%s/onnowandnext.json?f=asset.title&f=asset.descriptions.json',
+                $this->channelListId
             )
         );
         $onNowJson = $onNowStream->getBody()->getContents();
@@ -105,7 +104,7 @@ class XumoService implements ChannelSource
         $streamUrl = $this->getStreamUrl($channel->streamAssetId);
 
         return new Channel([
-            "id"            => $channel->guid->value,
+            "id"            => 'xumo.'.$channel->guid->value,
             "name"          => $channel->title,
             "number"        => $channel->number,
             "title"         => $channel->title,
@@ -145,14 +144,9 @@ class XumoService implements ChannelSource
                 )
             );
             $assetJson = $assetStream->getBody()->getContents();
-            $asset = collect(json_decode($assetJson));
+            $asset = json_decode($assetJson);
 
-            return $asset
-                ->providers
-                ->first()
-                ->sources
-                ->first()
-                ->uri ?? '';
+            return $asset->providers[0]->sources[0]->uri ?? '';
         } catch (Throwable $e) {
             return '';
         }
@@ -160,30 +154,36 @@ class XumoService implements ChannelSource
 
     private function setChannelListAndGeoId(): void
     {
-        $ids = Cache::remember('channels-buddy-xumo.ids', 43200, function() {
-                try {
-                    $request = $this->httpClient->get(
-                        $this->loginUrl, [
-                            'headers' => [
-                                'User-Agent' => 'Mozilla/5.0'
-                            ]
+        $ids = Cache::remember('channels-buddy-xumo.identifiers', 43200, function() {
+            try {
+                $request = $this->httpClient->get(
+                    $this->loginUrl, [
+                        'headers' => [
+                            'User-Agent' => 'Mozilla/5.0'
                         ]
-                    );
-                    $response = $request->getBody()->getContents();
+                    ]
+                );
+                $response = $request->getBody()->getContents();
 
-                    preg_match('/"channelListId":"(.*?)",/m', $response, $channelList);
-                    preg_match('/"geoId":"(.*?)",/m', $response, $geoId);
+                preg_match('/"channelListId":"(.*?)",/m', $response, $channelList);
+                preg_match('/"geoId":"(.*?)",/m', $response, $geoId);
 
-                    return [
-                        'channelListId' => $channelList[1],
-                        'geoId' => $geoId[1]
-                    ];
-                } catch (Throwable $e) {
-                    report("Xumo setup failed.");
-                    abort(500);
-                }
-            });
-        $this->channelListId = $ids['channelListId'];
-        $this->geoId = $ids['geoId'];
+                return [
+                    'channelListId' => $channelList[1],
+                    'geoId' => $geoId[1]
+                ];
+            } catch (Throwable $e) {
+                report("Xumo setup failed.");
+            }
+        });
+
+        if (empty($ids)) {
+            Cache::forget('channels-buddy-xumo.identifiers');
+            report("Xumo failed to get location identifiers.");
+            abort(500);
+        } else {
+            $this->channelListId = $ids['channelListId'];
+            $this->geoId = $ids['geoId'];
+        }
     }
 }
