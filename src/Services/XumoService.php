@@ -177,7 +177,7 @@ class XumoService implements ChannelSource
         $streamUrl = $this->getStreamUrl($channel->streamAssetId);
 
         return new Channel([
-            "id"            => 'xumo.'.$channel->guid->value,
+            "id"            => $channel->guid->value,
             "name"          => $channel->title,
             "number"        => $channel->number,
             "title"         => $channel->title,
