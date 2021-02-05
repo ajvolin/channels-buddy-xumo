@@ -183,19 +183,11 @@ class XumoService implements ChannelSource
             "title"         => $channel->title,
             "callSign"      => $channel->callsign,
             "description"   => $this->getCleanDescription($channel->description),
-            "logo"          => $this->getLogoUrl($channel->guid->value),
-            "channelArt"    => $this->getChannelArtUrl($channel->guid->value),
+            "logo"          => $this->getImageUrl($channel->guid->value),
+            "channelArt"    => $this->getImageUrl($channel->guid->value, true),
             "category"      => $channel->genre[0]->value ?? null,
             "streamUrl"     => $streamUrl
         ]);
-    }
-
-    private function getChannelArtUrl(string $channelId): string
-    {
-        return sprintf(
-            'https://image.xumo.com/v1/channels/channel/%s/1024x768.png?type=channelTile',
-            $channelId
-        );
     }
 
     private function getCleanDescription(string $description): string
@@ -205,12 +197,12 @@ class XumoService implements ChannelSource
         );
     }
 
-    private function getLogoUrl(string $channelId, string $color = 'White'): string
+    private function getImageUrl(string $channelId, bool $isChannelArt = false): string
     {
         return sprintf(
-            'https://image.xumo.com/v1/channels/channel/%s/1024x768.png?type=color_on%s',
+            'https://image.xumo.com/v1/channels/channel/%s/600x450.png?type=%s',
             $channelId,
-            ucwords(strtolower($color))
+            $isChannelArt ? 'channelTile' : 'color_onWhite'
         );
     }
 
